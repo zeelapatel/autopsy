@@ -395,6 +395,20 @@ def config_validate() -> None:
         table.add_row("AWS Credentials", "[red]✘ Not found[/red]", aws["source"])
         all_ok = False
 
+    # GitLab (optional)
+    gitlab = status.get("gitlab_token", {"configured": False, "source": "not set"})
+    if gitlab["configured"]:
+        table.add_row("GitLab Token", "[green]✔[/green]", gitlab["source"])
+    else:
+        table.add_row("GitLab Token", "[yellow]⚠ not configured[/yellow]", "optional")
+
+    # GCP (optional)
+    gcp = status.get("gcp", {"configured": False, "source": "not set"})
+    if gcp["configured"]:
+        table.add_row("GCP Credentials", "[green]✔[/green]", gcp["source"])
+    else:
+        table.add_row("GCP Credentials", "[yellow]⚠ not configured[/yellow]", "optional")
+
     # Slack (optional)
     slack = status.get("slack", {"configured": False, "channel": "", "source": "not set"})
     if slack["configured"]:

@@ -128,6 +128,25 @@ class DatadogConfig(BaseModel):
         return v
 
 
+class GCPConfig(BaseModel):
+    """GCP Cloud Logging configuration (optional)."""
+
+    project_id: str
+    credentials_env: str = "GOOGLE_APPLICATION_CREDENTIALS"
+    resource_type: str | None = None
+    log_filter: str | None = None
+    time_window: int = Field(default=30, ge=5, le=60)
+
+    @field_validator("project_id")
+    @classmethod
+    def validate_project_id(cls, v: str) -> str:
+        """GCP project IDs: 6-30 chars."""
+        if not v or len(v) < 6 or len(v) > 30:
+            msg = f"GCP project_id must be 6-30 characters: '{v}'"
+            raise ValueError(msg)
+        return v
+
+
 class AIConfig(BaseModel):
     """AI provider configuration."""
 
@@ -173,6 +192,7 @@ class AutopsyConfig(BaseModel):
     version: int = 1
     aws: AWSConfig
     datadog: DatadogConfig | None = None
+    gcp: GCPConfig | None = None
     github: GitHubConfig
     gitlab: GitLabConfig | None = None
     ai: AIConfig = Field(default_factory=AIConfig)
@@ -286,12 +306,30 @@ def validate_config(config: AutopsyConfig) -> dict[str, dict]:
         gitlab_status["configured"] = bool(gl_val)
         gitlab_status["source"] = _src(config.gitlab.token_env, gl_val) if gl_val else "not set"
 
+    gcp_status: dict[str, object] = {"configured": False, "source": "not set"}
+    if config.gcp is not None:
+        creds_env = config.gcp.credentials_env
+        creds_val = os.environ.get(creds_env, "").strip()
+        if creds_val:
+            gcp_status["configured"] = True
+            gcp_status["source"] = _src(creds_env, creds_val)
+        else:
+            from autopsy.collectors.gcp import GCPCollector
+
+            if GCPCollector._gcp_default_creds_available():
+                gcp_status["configured"] = True
+                gcp_status["source"] = "ADC (gcloud / metadata server)"
+            else:
+                gcp_status["configured"] = False
+                gcp_status["source"] = "not set"
+
     return {
         "github_token": {
             "set": bool(gh_val),
             "source": _src(config.github.token_env, gh_val),
         },
         "gitlab_token": gitlab_status,
+        "gcp": gcp_status,
         "anthropic_key": {
             "set": bool(anth_val),
             "source": _src(config.ai.anthropic_api_key_env, anth_val),
@@ -469,6 +507,17 @@ def _update_env_file(entries: dict[str, str], env_path: Path | None = None) -> N
     path.chmod(0o600)
 
 
+def _raise_config_validation_error(exc: ValidationError, context: str) -> None:
+    """Convert a Pydantic ValidationError into a ConfigValidationError."""
+    errors = "; ".join(
+        f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+    )
+    raise ConfigValidationError(
+        message=f"Invalid {context} configuration: {errors}",
+        hint="Re-run 'autopsy init' and double-check your inputs.",
+    ) from exc
+
+
 def init_wizard(config_path: Path | None = None) -> Path:
     """Interactive setup wizard using Rich prompts.
 
@@ -528,13 +577,7 @@ def init_wizard(config_path: Path | None = None) -> Path:
             profile=aws_profile or None,
         )
     except ValidationError as exc:
-        errors = "; ".join(
-            f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
-        )
-        raise ConfigValidationError(
-            message=f"Invalid configuration: {errors}",
-            hint="Re-run 'autopsy init' and double-check your inputs.",
-        ) from exc
+        _raise_config_validation_error(exc, "AWS")
 
     # GitLab (optional)
     console.print("\n[bold cyan]GitLab Configuration (Optional)[/bold cyan]")
@@ -561,20 +604,15 @@ def init_wizard(config_path: Path | None = None) -> Path:
                     deploy_count=gl_deploy_count,
                 )
             except ValidationError as exc:
-                errors = "; ".join(
-                    f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
-                )
-                raise ConfigValidationError(
-                    message=f"Invalid GitLab configuration: {errors}",
-                    hint="Re-run 'autopsy init' and double-check your GitLab inputs.",
-                ) from exc
+                _raise_config_validation_error(exc, "GitLab")
 
-    # Log sources (CloudWatch already configured, Datadog optional)
+    # Log sources (CloudWatch already configured, Datadog and GCP optional)
     console.print("\n[bold cyan]📋 Log Sources[/bold cyan]")
     console.print(
         "  Which log sources do you use?\n\n"
         "  [x] AWS CloudWatch (already configured)\n"
         "  [ ] Datadog\n"
+        "  [ ] GCP Cloud Logging\n"
     )
     add_datadog = Prompt.ask("  Add Datadog? [y/N]", default="N").strip().lower() == "y"
 
@@ -602,13 +640,32 @@ def init_wizard(config_path: Path | None = None) -> Path:
                 time_window=time_window,
             )
         except ValidationError as exc:
-            errors = "; ".join(
-                f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
-            )
-            raise ConfigValidationError(
-                message=f"Invalid Datadog configuration: {errors}",
-                hint="Re-run 'autopsy init' and double-check your Datadog inputs.",
-            ) from exc
+            _raise_config_validation_error(exc, "Datadog")
+
+    # GCP Cloud Logging (optional)
+    add_gcp = Prompt.ask("  Add GCP Cloud Logging? [y/N]", default="N").strip().lower() == "y"
+
+    gcp_cfg: GCPConfig | None = None
+    if add_gcp:
+        console.print("\n[bold cyan]GCP Cloud Logging Configuration[/bold cyan]")
+        gcp_project = Prompt.ask("GCP Project ID (e.g., my-project-123)").strip()
+        if not gcp_project:
+            console.print("[yellow]⚠ Project ID is required. Skipping GCP.[/yellow]")
+            add_gcp = False
+        else:
+            gcp_resource_type = Prompt.ask(
+                "Resource type filter (optional — e.g., cloud_function, gke_container; "
+                "press Enter to skip)",
+                default="",
+            ).strip() or None
+            try:
+                gcp_cfg = GCPConfig(
+                    project_id=gcp_project,
+                    resource_type=gcp_resource_type,
+                    time_window=time_window,
+                )
+            except ValidationError as exc:
+                _raise_config_validation_error(exc, "GCP")
 
     # --- Phase 2: Credentials ---
     console.print(
@@ -803,6 +860,29 @@ def init_wizard(config_path: Path | None = None) -> Path:
                 ),
             )
 
+    # GCP credentials (optional)
+    if gcp_cfg is not None:
+        console.print(
+            "\n[bold cyan]GCP Credentials[/bold cyan]\n"
+            "  Autopsy uses Google Application Default Credentials (ADC).\n\n"
+            "  Option 1: Service account JSON key (recommended for CI/headless)\n"
+            "  Option 2: 'gcloud auth application-default login' (for local dev)\n"
+        )
+        gcp_sa_path = Prompt.ask(
+            "Path to service account JSON (press Enter to skip — uses gcloud ADC)",
+            default="",
+        ).strip()
+        if gcp_sa_path:
+            env_entries["GOOGLE_APPLICATION_CREDENTIALS"] = gcp_sa_path
+            console.print(
+                f"[green]✔ GOOGLE_APPLICATION_CREDENTIALS set to {gcp_sa_path}[/green]"
+            )
+        else:
+            console.print(
+                "[dim]⏭ Skipped — make sure you have run "
+                "'gcloud auth application-default login'[/dim]"
+            )
+
     # AWS — just check, don't ask
     aws_status = _check_aws_credentials(aws_cfg)
     if aws_status["found"]:
@@ -819,6 +899,7 @@ def init_wizard(config_path: Path | None = None) -> Path:
     config = AutopsyConfig(
         aws=aws_cfg,
         datadog=datadog_cfg,
+        gcp=gcp_cfg,
         github=GitHubConfig(
             repo=repo,
             token_env="GITHUB_TOKEN",
@@ -987,6 +1068,12 @@ def _render_config_summary(config: AutopsyConfig) -> None:
         f"branch={config.github.branch}  "
         f"deploys={config.github.deploy_count}",
     ]
+    if config.gcp is not None:
+        lines.append(
+            f"[bold]GCP[/bold]  project={config.gcp.project_id}"
+            + (f"  resource_type={config.gcp.resource_type}" if config.gcp.resource_type else "")
+            + f"  window={config.gcp.time_window}m"
+        )
     if config.gitlab is not None:
         lines.append(
             f"[bold]GitLab[/bold]  url={config.gitlab.url}  "

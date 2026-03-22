@@ -46,9 +46,8 @@ def _run_diagnose_inline() -> None:
         cfg = load_config()
         console.print("[green]✔[/green] Config loaded")
 
-        with console.status("[bold]Running diagnosis pipeline...[/bold]"):
-            orchestrator = DiagnosisOrchestrator(cfg)
-            result = orchestrator.run()
+        orchestrator = DiagnosisOrchestrator(cfg)
+        result = orchestrator.run()
 
         console.print("[green]✔[/green] Diagnosis complete\n")
         TerminalRenderer().render(result)
@@ -82,8 +81,8 @@ def run_interactive() -> None:
     choices = [
         "Diagnose  — Pull logs + deploys → AI root cause",
         "History   — View diagnosis history",
-        "Setup     — Interactive wizard (AWS, GitHub, AI, Slack)",
-        "Validate  — Test credentials and connectivity (AWS, GitHub, AI, Slack)",
+        "Setup     — Interactive wizard (AWS, GitHub, AI, log sources)",
+        "Validate  — Test credentials and connectivity",
         "Show config — Current config (secrets masked)",
         "Quit",
     ]

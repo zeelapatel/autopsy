@@ -53,6 +53,7 @@ dependencies = [
     "pyyaml>=6.0",
     "questionary>=2.0",
     "python-gitlab>=4.0",
+    "google-cloud-logging>=3.0",
 ]
 
 [project.optional-dependencies]

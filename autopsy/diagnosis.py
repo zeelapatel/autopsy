@@ -19,6 +19,7 @@ from rich.console import Console
 from autopsy.ai.engine import AIEngine
 from autopsy.collectors.cloudwatch import CloudWatchCollector
 from autopsy.collectors.datadog import DatadogCollector
+from autopsy.collectors.gcp import GCPCollector
 from autopsy.collectors.github import GitHubCollector
 from autopsy.collectors.gitlab import GitLabCollector
 from autopsy.config import AutopsyConfig  # noqa: TC001 — used at runtime for __init__
@@ -73,6 +74,10 @@ class DiagnosisOrchestrator:
             dd = DatadogCollector()
             dd._autopsy_role = "datadog"
             collectors.append(dd)
+        if getattr(self.config, "gcp", None) is not None:
+            gc = GCPCollector()
+            gc._autopsy_role = "gcp"
+            collectors.append(gc)
         gh = GitHubCollector()
         gh._autopsy_role = "github"
         collectors.append(gh)
@@ -110,6 +115,7 @@ class DiagnosisOrchestrator:
         self,
         aws_dict: dict,
         datadog_dict: dict | None,
+        gcp_dict: dict | None = None,
         source_filter: tuple[str, ...] | None = None,
     ) -> list[_CollectorTask]:
         """Build the list of collector tasks with resolved configs.
@@ -140,6 +146,18 @@ class DiagnosisOrchestrator:
                     )
                     continue
                 tasks.append(_CollectorTask(collector, datadog_dict, role))
+            elif role == "gcp":
+                if gcp_dict is None:
+                    continue
+                creds_env = gcp_dict.get("credentials_env", "GOOGLE_APPLICATION_CREDENTIALS")
+                creds_path = os.environ.get(creds_env, "").strip()
+                if not creds_path and not GCPCollector._gcp_default_creds_available():
+                    console.print(
+                        f"[yellow]⚠ GCP credentials not found ({creds_env} not set, "
+                        f"no ADC) — skipping GCP Cloud Logging.[/yellow]"
+                    )
+                    continue
+                tasks.append(_CollectorTask(collector, gcp_dict, role))
             elif role == "gitlab":
                 gitlab_cfg = getattr(self.config, "gitlab", None)
                 if gitlab_cfg is None:
@@ -383,6 +401,12 @@ class DiagnosisOrchestrator:
             if time_window is not None:
                 datadog_dict["time_window"] = time_window
 
+        gcp_dict: dict | None = None
+        if getattr(self.config, "gcp", None) is not None:
+            gcp_dict = self.config.gcp.model_dump()
+            if time_window is not None:
+                gcp_dict["time_window"] = time_window
+
         ai_provider = (
             provider if provider is not None else self.config.ai.provider
         )
@@ -405,7 +429,7 @@ class DiagnosisOrchestrator:
 
         # Build collector tasks (skip-logic lives here)
         tasks = self._resolve_collector_tasks(
-            aws_dict, datadog_dict, source_filter=source_filter
+            aws_dict, datadog_dict, gcp_dict, source_filter=source_filter
         )
 
         # Collect — parallel by default, sequential on request

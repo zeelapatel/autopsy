@@ -76,6 +76,14 @@ class DatadogRateLimitError(CollectorError):
     """Datadog API rate limit exceeded."""
 
 
+class GCPAuthError(CollectorError):
+    """GCP credentials are invalid, expired, or not configured."""
+
+
+class GCPPermissionError(CollectorError):
+    """GCP IAM permissions insufficient for Cloud Logging."""
+
+
 class NoDataError(CollectorError):
     """Query returned zero results."""
 
